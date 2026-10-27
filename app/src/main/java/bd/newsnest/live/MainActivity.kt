@@ -87,9 +87,10 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             videoName.text = "নির্বাচিত: " + d.data!!.lastPathSegment
         }
     }
-
-    private fun toast(s: String) = ui.post { Toast.makeText(this, s, Toast.LENGTH_LONG).show() }
-    private fun setStatus(s: String) = ui.post { status.text = s }
+private var pfdV: android.os.ParcelFileDescriptor? = null
+private var pfdA: android.os.ParcelFileDescriptor? = null
+    private fun toast(s: String) { ui.post { Toast.makeText(this, s, Toast.LENGTH_LONG).show() } }
+       private fun setStatus(s: String) { ui.post { status.text = s } } 
 
     private fun http(method: String, url: String, body: String? = null): String {
         val c = URL(url).openConnection() as HttpURLConnection
@@ -133,7 +134,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
                 val url = j.getString("secure_stream_url")
                 ui.post {
                     val g = RtmpFromFile(this, this, this); gen = g
-                    if (g.prepareVideo(this, uri, bitrate) && g.prepareAudio(this, uri, 128 * 1024)) {
+                    pfdV = contentResolver.openFileDescriptor(uri, "r"); pfdA = contentResolver.openFileDescriptor(uri, "r")
+if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 128 * 1024)) {
                         g.startStream(url)
                     } else { toast("ভিডিও প্রস্তুত করা যায়নি"); endFb() }
                 }
