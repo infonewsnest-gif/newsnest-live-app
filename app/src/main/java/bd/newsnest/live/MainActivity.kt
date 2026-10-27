@@ -37,7 +37,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private lateinit var videoName: TextView
     private lateinit var timer: TextView
     private lateinit var liveBtn: Button
-
+    
+private lateinit var preview: android.widget.VideoView
     private fun et(hint: String, v: String, pw: Boolean = false) = EditText(this).apply {
         this.hint = hint; setText(v); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
         if (pw) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -70,6 +71,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "video/*"; addCategory(Intent.CATEGORY_OPENABLE) }, 1)
         })
         col.addView(videoName)
+        preview = android.widget.VideoView(this); col.addView(preview, LinearLayout.LayoutParams(-1,Button
+                                                                                                 
         col.addView(tv("কোয়ালিটি"))
         val row = LinearLayout(this)
         listOf("360p" to 600_000, "720p" to 1_500_000, "1080p" to 3_000_000).forEach { (n, br) ->
@@ -85,6 +88,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             videoUri = d.data
             contentResolver.takePersistableUriPermission(d.data!!, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             videoName.text = "নির্বাচিত: " + d.data!!.lastPathSegment
+            preview.setVideoURI(d.data); preview.setOnPreparedListener { it.isLooping = true; it.setVolume(0f, 0f) }; preview.start()
         }
     }
 private var pfdV: android.os.ParcelFileDescriptor? = null
