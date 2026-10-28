@@ -3,6 +3,7 @@ package bd.newsnest.live
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -56,6 +57,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private lateinit var videoDur: TextView
     private lateinit var playBtn: Button
     private lateinit var soundBtn: Button
+    private lateinit var fullBtn: Button
+    private lateinit var pcCard: LinearLayout
+    private var full = false
+    private var autoRot = false
+    private lateinit var rotBtn: TextView
     private lateinit var seekBar: SeekBar
     private var seeking = false
     private var mp: MediaPlayer? = null
@@ -183,6 +189,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 60, 36, 60) }
         val sv = ScrollView(this).apply { setBackgroundColor(0xFF0B1020.toInt()); addView(col) }
         setContentView(sv)
@@ -206,7 +213,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         shortTok = et("শর্ট-লিভড টোকেন", prefs.getString("stok", "") ?: "", true)
         title = et("টাইটেল", prefs.getString("title", "NewsNest Live — সরাসরি সম্প্রচার") ?: "")
 
-        // হেডার
+        // হেডার (অটো রোটেট আইকন + অবস্থা)
         val head = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         val headCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         headCol.addView(tv("NewsNest Live", 24f))
@@ -214,11 +221,18 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         head.addView(headCol, LinearLayout.LayoutParams(0, -2, 1f))
         status.background = round(0xFF1F2937.toInt(), 60f)
         status.setPadding(36, 16, 36, 16)
+        rotBtn = tv("🔒", 22f).apply {
+            background = round(0xFF1F2937.toInt(), 60f)
+            setPadding(30, 14, 30, 14)
+            setOnClickListener { toggleAuto() }
+        }
+        head.addView(rotBtn, LinearLayout.LayoutParams(-2, -2).apply { setMargins(0, 0, 16, 0) })
         head.addView(status)
         col.addView(head)
 
         // ---------- প্রিভিউ কার্ড ----------
         val pc = card("")
+        pcCard = pc
         previewBox = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         preview = VideoView(this)
         previewBox.addView(preview, FrameLayout.LayoutParams(-1, -1))
@@ -261,9 +275,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
         playBtn = btn("▶ প্লে", DARK) { togglePlay() }
         soundBtn = btn("🔊 শব্দ চালু", DARK) { previewSound = !previewSound; applySound() }
+        fullBtn = btn("⛶ ফুলস্ক্রিন", DARK) { toggleFull() }
         val prow2 = LinearLayout(this)
         prow2.addView(playBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
         prow2.addView(soundBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
+        prow2.addView(fullBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
         pc.addView(prow2)
         ui.post(posTick)
 
@@ -392,19 +408,54 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         if (longTok.text.isNotBlank() || shortTok.text.isNotBlank()) loadPageInfo(false)
     }
 
+    // ---------- অটো রোটেট আইকন, ফুলস্ক্রিন ----------
+    private fun toggleAuto() {
+        autoRot = !autoRot
+        requestedOrientation = if (autoRot) ActivityInfo.SCREEN_ORIENTATION_SENSOR else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        rotBtn.text = if (autoRot) "🔄" else "🔒"
+        toast(if (autoRot) "অটো রোটেট চালু: ফোন আড়াআড়ি ধরলে ফুলস্ক্রিন হবে" else "পোর্ট্রেটে আটকানো")
+    }
+
+    private fun applyFull(on: Boolean) {
+        full = on
+        for (i in 0 until col.childCount) {
+            col.getChildAt(i).visibility = if (on && col.getChildAt(i) !== pcCard) View.GONE else View.VISIBLE
+        }
+        videoName.visibility = if (on) View.GONE else View.VISIBLE
+        col.setPadding(if (on) 0 else 36, if (on) 0 else 60, if (on) 0 else 36, if (on) 0 else 60)
+        fullBtn.text = if (on) "⛶ ফুলস্ক্রিন বন্ধ" else "⛶ ফুলস্ক্রিন"
+        window.decorView.systemUiVisibility = if (on)
+            (View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY) else 0
+        updatePreviewSize()
+    }
+
+    private fun toggleFull() {
+        if (!full) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            applyFull(true)
+        } else {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            applyFull(false)
+            if (autoRot) ui.postDelayed({ requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR }, 1500)
+        }
+    }
+
+    override fun onBackPressed() { if (full) toggleFull() else super.onBackPressed() }
+
     override fun onPause() { super.onPause(); save() }
 
-    // ফোন ঘোরালে প্রিভিউ নতুন মাপে বসে (AndroidManifest এ configChanges দিতে হবে)
+    // ফোন ঘুরলে (অটো রোটেট আইকন 🔄 থাকলে) নিজে ফুলস্ক্রিন হয়
     override fun onConfigurationChanged(c: Configuration) {
         super.onConfigurationChanged(c)
-        updatePreviewSize()
+        val land = c.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (land != full) applyFull(land) else updatePreviewSize()
         refreshPreviewTicker()
     }
 
     // ---------- প্রিভিউয়ের মাপ ও ফ্রেমের বার ----------
     private fun updatePreviewSize() {
         val w = resources.displayMetrics.widthPixels - 144
-        val maxH = (resources.displayMetrics.heightPixels * 0.7f).toInt()
+        val maxH = if (full) resources.displayMetrics.heightPixels - 300 else (resources.displayMetrics.heightPixels * 0.7f).toInt()
         var h = (w / videoAspect).toInt()
         var ww = -1
         if (h > maxH) { h = maxH; ww = (h * videoAspect).toInt() }
