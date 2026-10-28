@@ -838,11 +838,6 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             f.setPosition(logoXPct, logoYPct)
             logoFilter = f
         }
-        val tf = TextObjectFilterRender()
-        gl.addFilter(tf)
-        tf.setText("00:00", streamH / 20f, Color.WHITE, 0xAA000000.toInt())
-        tf.setDefaultScale(streamW, streamH)
-        timeFilter = tf
         applyFrameStream()
         applyCaptionStream()
     }
