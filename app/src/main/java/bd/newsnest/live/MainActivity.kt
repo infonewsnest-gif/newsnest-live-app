@@ -137,6 +137,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private var capX = 0f
     private var capY = 90f
 
+    // ওভারলে স্ট্রিম চালুর পরে জোড়া হবে, তাই এখানে রাখা হয়
+    private var pendingGl: GlInterface? = null
+    private var pendingW = 1280
+    private var pendingH = 720
+
     private var pfdV: android.os.ParcelFileDescriptor? = null
     private var pfdA: android.os.ParcelFileDescriptor? = null
 
@@ -926,7 +931,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 128 * 1024)) {
             val sw = if (g.streamWidth > 0) g.streamWidth else 1280
             val sh = if (g.streamHeight > 0) g.streamHeight else 720
-            try { setupOverlays(g.glInterface, sw, sh) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
+            // ওভারলে এখন জোড়া হবে না। সংযোগ সফল হলে (onConnectionSuccess) জোড়া হবে
+            pendingGl = g.glInterface; pendingW = sw; pendingH = sh
             if (listenCb.isChecked) {
                 previewSound = false; applySound()
                 try { g.playAudioDevice() } catch (_: Exception) {}
@@ -944,7 +950,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         if (c.prepareAudio() && c.prepareVideo(w, h, bitrate)) {
             val sw = if (portrait) h else w
             val sh = if (portrait) w else h
-            try { setupOverlays(c.glInterface, sw, sh) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
+            // ওভারলে এখন জোড়া হবে না। সংযোগ সফল হলে (onConnectionSuccess) জোড়া হবে
+            pendingGl = c.glInterface; pendingW = sw; pendingH = sh
             if (!micOn) { try { c.disableAudio() } catch (_: Exception) {} }
             c.startStream(url)
         } else { toast("ক্যামেরা প্রস্তুত করা যায়নি"); endFb(); stopSvc() }
@@ -962,6 +969,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         ui.removeCallbacks(statsTick); ui.removeCallbacks(capTick)
         capFilter = null; logoFilter = null; timeFilter = null; cropFilter = null; glI = null
         barL = null; barR = null; barT = null; barB = null
+        pendingGl = null
         stopSvc()
         setStatus("● অফলাইন"); liveBtn.text = "লাইভ চালু করুন"
     }
@@ -1017,7 +1025,17 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         ui.postDelayed(this, 10000) } }
 
     override fun onConnectionStarted(url: String) {}
-    override fun onConnectionSuccess() { ui.post { live = true; startMs = System.currentTimeMillis(); setStatus("🔴 লাইভ"); liveBtn.text = "লাইভ বন্ধ করুন"; tick.run(); statsTick.run(); capTick.run() } }
+    override fun onConnectionSuccess() { ui.post {
+        live = true; startMs = System.currentTimeMillis(); setStatus("🔴 লাইভ"); liveBtn.text = "লাইভ বন্ধ করুন"
+        tick.run(); statsTick.run(); capTick.run()
+        // স্ট্রিম চালু হওয়ার একটু পরে ওভারলে জোড়া হয়
+        ui.postDelayed({
+            val g = pendingGl
+            if (live && g != null) {
+                try { setupOverlays(g, pendingW, pendingH) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
+            }
+        }, 700)
+    } }
     override fun onConnectionFailed(reason: String) { toast("সংযোগ ব্যর্থ: $reason"); ui.post { stopLive() } }
     override fun onNewBitrate(bitrate: Long) {}
     override fun onDisconnect() {}
