@@ -142,8 +142,9 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private var pendingW = 1280
     private var pendingH = 720
 
-    // পরীক্ষা: false = ওভারলে (লোগো, ক্যাপশন, সময়, বার, জুম) স্ট্রিমে বন্ধ। ক্রাশ ঠিক হলে true করব
-    private val OVERLAYS_ON = false
+    // পরীক্ষা: স্ট্রিমে কতটুকু ওভারলে চলবে
+    // 0 = কিছুই না, 1 = ক্যাপশন + সময়, 2 = + লোগো, 3 = + কালো বার (ফ্রেম), 4 = + জুম
+    private val OVERLAY_LEVEL = 1
 
     private var pfdV: android.os.ParcelFileDescriptor? = null
     private var pfdA: android.os.ParcelFileDescriptor? = null
@@ -812,17 +813,21 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         streamW = sw
         streamH = sh
 
-        val cf = CropFilterRender()
-        gl.addFilter(cf); cropFilter = cf
-        applyZoomStream()
+        if (OVERLAY_LEVEL >= 4) {
+            val cf = CropFilterRender()
+            gl.addFilter(cf); cropFilter = cf
+            applyZoomStream()
+        }
 
-        val black = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
-        val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(black); barL = bl
-        val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(black); barR = br
-        val bt = ImageObjectFilterRender(); gl.addFilter(bt); bt.setImage(black); barT = bt
-        val bb = ImageObjectFilterRender(); gl.addFilter(bb); bb.setImage(black); barB = bb
+        if (OVERLAY_LEVEL >= 3) {
+            val black = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+            val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(black); barL = bl
+            val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(black); barR = br
+            val bt = ImageObjectFilterRender(); gl.addFilter(bt); bt.setImage(black); barT = bt
+            val bb = ImageObjectFilterRender(); gl.addFilter(bb); bb.setImage(black); barB = bb
+        }
 
-        logoBmp?.let { bmp ->
+        if (OVERLAY_LEVEL >= 2) logoBmp?.let { bmp ->
             val f = ImageObjectFilterRender()
             gl.addFilter(f); f.setImage(bmp)
             val sx = logoScalePct()
@@ -1034,7 +1039,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         // স্ট্রিম চালু হওয়ার একটু পরে ওভারলে জোড়া হয়
         ui.postDelayed({
             val g = pendingGl
-            if (OVERLAYS_ON && live && g != null) {
+            if (OVERLAY_LEVEL >= 1 && live && g != null) {
                 try { setupOverlays(g, pendingW, pendingH) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
             }
         }, 700)
