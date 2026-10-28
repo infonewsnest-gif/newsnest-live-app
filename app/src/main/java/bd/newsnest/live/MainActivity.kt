@@ -142,6 +142,9 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private var pendingW = 1280
     private var pendingH = 720
 
+    // পরীক্ষা: false = ওভারলে (লোগো, ক্যাপশন, সময়, বার, জুম) স্ট্রিমে বন্ধ। ক্রাশ ঠিক হলে true করব
+    private val OVERLAYS_ON = false
+
     private var pfdV: android.os.ParcelFileDescriptor? = null
     private var pfdA: android.os.ParcelFileDescriptor? = null
 
@@ -1031,7 +1034,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         // স্ট্রিম চালু হওয়ার একটু পরে ওভারলে জোড়া হয়
         ui.postDelayed({
             val g = pendingGl
-            if (live && g != null) {
+            if (OVERLAYS_ON && live && g != null) {
                 try { setupOverlays(g, pendingW, pendingH) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
             }
         }, 700)
