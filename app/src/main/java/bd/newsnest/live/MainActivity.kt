@@ -4,6 +4,7 @@ import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -20,6 +21,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.SurfaceHolder
 import android.view.View
 import android.view.animation.LinearInterpolator
 import android.widget.*
@@ -29,7 +31,11 @@ import com.pedro.encoder.input.decoder.VideoDecoderInterface
 import com.pedro.encoder.input.gl.render.filters.CropFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.TextObjectFilterRender
+import com.pedro.encoder.input.video.CameraHelper
+import com.pedro.library.rtmp.RtmpCamera2
 import com.pedro.library.rtmp.RtmpFromFile
+import com.pedro.library.view.GlInterface
+import com.pedro.library.view.OpenGlView
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -41,11 +47,15 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private val prefs by lazy { getSharedPreferences("nn", MODE_PRIVATE) }
     private var videoUri: Uri? = null
     private var gen: RtmpFromFile? = null
+    private var cam: RtmpCamera2? = null
+    private var glI: GlInterface? = null
     private var liveId: String? = null
     private var pageToken = ""
     private var live = false
     private var startMs = 0L
     private var bitrate = 1_500_000
+    private var qIdx = 1
+    private val qWH = listOf(640 to 360, 1280 to 720, 1920 to 1080)
 
     private lateinit var col: LinearLayout
     private lateinit var pageId: EditText
@@ -76,6 +86,15 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private lateinit var pageFans: TextView
     private lateinit var statsView: TextView
     private lateinit var commentsView: TextView
+
+    // ক্যামেরা
+    private lateinit var glView: OpenGlView
+    private lateinit var camRow: LinearLayout
+    private lateinit var micBtn: Button
+    private var srcCamera = false
+    private var micOn = true
+    private var surfaceReady = false
+    private var fileAspect = 16f / 9f
 
     // লোগো ও ক্যাপশন
     private lateinit var logoPrev: ImageView
@@ -236,6 +255,22 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         previewBox = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         preview = VideoView(this)
         previewBox.addView(preview, FrameLayout.LayoutParams(-1, -1))
+
+        // ক্যামেরার লাইভ প্রিভিউ (ভিডিও ফাইল মোডে লুকানো থাকে)
+        glView = OpenGlView(this).apply { visibility = View.GONE }
+        previewBox.addView(glView, FrameLayout.LayoutParams(-1, -1))
+        glView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(h: SurfaceHolder) {
+                surfaceReady = true
+                if (srcCamera && cam != null) startCamPreview()
+            }
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {}
+            override fun surfaceDestroyed(h: SurfaceHolder) {
+                surfaceReady = false
+                stopCamPreview()
+            }
+        })
+
         barLeftV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
         barRightV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
         barTopV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
@@ -281,6 +316,13 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         prow2.addView(soundBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
         prow2.addView(fullBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
         pc.addView(prow2)
+
+        // ক্যামেরা বোতাম (শুধু ক্যামেরা মোডে দেখায়)
+        camRow = LinearLayout(this).apply { visibility = View.GONE }
+        camRow.addView(btn("🔄 ক্যামেরা বদল", DARK) { switchCam() }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
+        micBtn = btn("🎤 মাইক চালু", DARK) { toggleMic() }
+        camRow.addView(micBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
+        pc.addView(camRow)
         ui.post(posTick)
 
         // দুই আঙুলে জুম
@@ -336,6 +378,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
         // ---------- স্টুডিও কন্ট্রোল ----------
         val sc = card("স্টুডিও কন্ট্রোল")
+        sc.addView(tv("\nলাইভের উৎস", 13f))
+        sc.addView(toggles(listOf("🎞 ভিডিও ফাইল", "📷 ফোন ক্যামেরা"), 0, 2) { setSource(it == 1) })
         sc.addView(tv("\nভিডিও উৎস (ফোনের ফাইল ম্যানেজার থেকে)", 13f))
         sc.addView(btn("ভিডিও নির্বাচন") {
             startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "video/*"; addCategory(Intent.CATEGORY_OPENABLE) }, 1)
@@ -350,10 +394,10 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
         sc.addView(tv("\nকোয়ালিটি", 13f))
         val qs = listOf(600_000, 1_500_000, 3_000_000)
-        sc.addView(toggles(listOf("360p", "720p", "1080p"), 1, 3) { bitrate = qs[it] })
+        sc.addView(toggles(listOf("360p", "720p", "1080p"), 1, 3) { bitrate = qs[it]; qIdx = it })
 
         listenCb = CheckBox(this).apply {
-            text = "লাইভের সময় ফোনেও শব্দ শুনব"; setTextColor(Color.WHITE)
+            text = "লাইভের সময় ফোনেও শব্দ শুনব (ভিডিও ফাইল)"; setTextColor(Color.WHITE)
             isChecked = prefs.getBoolean("listen", true)
         }
         sc.addView(listenCb)
@@ -408,6 +452,73 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         if (longTok.text.isNotBlank() || shortTok.text.isNotBlank()) loadPageInfo(false)
     }
 
+    // ---------- ক্যামেরা ----------
+    private fun hasPerm() =
+        checkSelfPermission("android.permission.CAMERA") == PackageManager.PERMISSION_GRANTED &&
+        checkSelfPermission("android.permission.RECORD_AUDIO") == PackageManager.PERMISSION_GRANTED
+
+    private fun askPerm() {
+        requestPermissions(arrayOf("android.permission.CAMERA", "android.permission.RECORD_AUDIO"), 11)
+    }
+
+    override fun onRequestPermissionsResult(rc: Int, p: Array<out String>, r: IntArray) {
+        super.onRequestPermissionsResult(rc, p, r)
+        if (rc == 11) {
+            if (hasPerm()) { if (srcCamera) ensureCam() }
+            else toast("ক্যামেরা ও মাইকের অনুমতি না দিলে ক্যামেরা চলবে না")
+        }
+    }
+
+    private fun setSource(camMode: Boolean) {
+        if (live) return toast("লাইভ চলার সময় উৎস বদলানো যাবে না")
+        srcCamera = camMode
+        preview.visibility = if (camMode) View.GONE else View.VISIBLE
+        glView.visibility = if (camMode) View.VISIBLE else View.GONE
+        seekBar.visibility = if (camMode) View.GONE else View.VISIBLE
+        playBtn.visibility = if (camMode) View.GONE else View.VISIBLE
+        soundBtn.visibility = if (camMode) View.GONE else View.VISIBLE
+        videoName.visibility = if (camMode) View.GONE else View.VISIBLE
+        videoDur.visibility = if (camMode) View.GONE else View.VISIBLE
+        camRow.visibility = if (camMode) View.VISIBLE else View.GONE
+        videoAspect = if (camMode) 9f / 16f else fileAspect
+        if (camMode) {
+            try { if (preview.isPlaying) preview.pause() } catch (_: Exception) {}
+            playBtn.text = "▶ প্লে"
+            if (!hasPerm()) askPerm() else ensureCam()
+        } else {
+            stopCamPreview()
+        }
+        updatePreviewSize()
+    }
+
+    private fun ensureCam() {
+        glView.post {
+            if (cam == null) cam = RtmpCamera2(glView, this)
+            if (surfaceReady) startCamPreview()
+        }
+    }
+
+    private fun startCamPreview() {
+        val c = cam ?: return
+        if (!hasPerm()) return
+        try { if (!c.isOnPreview) c.startPreview(CameraHelper.Facing.BACK, 1280, 720) }
+        catch (e: Exception) { toast("ক্যামেরা চালু হয়নি: ${e.message}") }
+    }
+
+    private fun stopCamPreview() {
+        try { if (cam?.isOnPreview == true) cam?.stopPreview() } catch (_: Exception) {}
+    }
+
+    private fun switchCam() {
+        try { cam?.switchCamera() } catch (e: Exception) { toast("ক্যামেরা বদল হয়নি: ${e.message}") }
+    }
+
+    private fun toggleMic() {
+        micOn = !micOn
+        try { if (micOn) cam?.enableAudio() else cam?.disableAudio() } catch (_: Exception) {}
+        micBtn.text = if (micOn) "🎤 মাইক চালু" else "🔇 মাইক বন্ধ"
+    }
+
     // ---------- অটো রোটেট আইকন, ফুলস্ক্রিন ----------
     private fun toggleAuto() {
         autoRot = !autoRot
@@ -421,7 +532,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         for (i in 0 until col.childCount) {
             col.getChildAt(i).visibility = if (on && col.getChildAt(i) !== pcCard) View.GONE else View.VISIBLE
         }
-        videoName.visibility = if (on) View.GONE else View.VISIBLE
+        videoName.visibility = if (on || srcCamera) View.GONE else View.VISIBLE
         col.setPadding(if (on) 0 else 36, if (on) 0 else 60, if (on) 0 else 36, if (on) 0 else 60)
         fullBtn.text = if (on) "⛶ ফুলস্ক্রিন বন্ধ" else "⛶ ফুলস্ক্রিন"
         window.decorView.systemUiVisibility = if (on)
@@ -497,7 +608,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
     private val posTick = object : Runnable { override fun run() {
         try {
-            if (durTotal != "--:--" && !seeking) {
+            if (!srcCamera && durTotal != "--:--" && !seeking) {
                 val p = preview.currentPosition
                 videoDur.text = "সময়: ${fmtMs(p)} / $durTotal মিনিট"
                 seekBar.progress = p
@@ -542,7 +653,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt() ?: 0
             mmr.release()
             if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
-            if (w > 0 && h > 0) videoAspect = w.toFloat() / h
+            if (w > 0 && h > 0) { videoAspect = w.toFloat() / h; fileAspect = videoAspect }
         } catch (_: Exception) {}
         durTotal = if (durMs > 0) fmtMs(durMs) else "--:--"
         seekBar.max = if (durMs > 0) durMs else 1
@@ -600,6 +711,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private fun setZoom(z: Float) {
         zoom = z.coerceIn(1f, 4f)
         preview.scaleX = zoom; preview.scaleY = zoom
+        glView.scaleX = zoom; glView.scaleY = zoom
         applyZoomStream()
         updateFrameInfo()
     }
@@ -675,11 +787,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     }
 
     private fun applyCaptionStream() {
-        val g = gen ?: return
+        val gl = glI ?: return
         val t = capText.text.toString()
         if (t.isBlank()) return
         var f = capFilter
-        if (f == null) { f = TextObjectFilterRender(); g.glInterface.addFilter(f); capFilter = f }
+        if (f == null) { f = TextObjectFilterRender(); gl.addFilter(f); capFilter = f }
         f.setText(t, streamH / 18f, colr(capColor.text.toString(), Color.WHITE), colr(capBg.text.toString(), 0xFFB91C1C.toInt()))
         f.setDefaultScale(streamW, streamH)
         val (_, tp) = barPcts(streamW.toFloat() / streamH)
@@ -687,10 +799,10 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         resetCaptionPos()
     }
 
-    private fun setupOverlays(g: RtmpFromFile) {
-        val gl = g.glInterface
-        streamW = if (g.streamWidth > 0) g.streamWidth else 1280
-        streamH = if (g.streamHeight > 0) g.streamHeight else 720
+    private fun setupOverlays(gl: GlInterface, sw: Int, sh: Int) {
+        glI = gl
+        streamW = sw
+        streamH = sh
 
         val cf = CropFilterRender()
         gl.addFilter(cf); cropFilter = cf
@@ -787,7 +899,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private fun stopSvc() { try { stopService(Intent(this, LiveService::class.java)) } catch (_: Exception) {} }
 
     private fun startLive() {
-        val uri = videoUri ?: return toast("আগে ভিডিও নির্বাচন করুন")
+        if (srcCamera) {
+            if (!hasPerm()) { askPerm(); return toast("ক্যামেরা ও মাইকের অনুমতি দিন") }
+            if (cam == null) return toast("ক্যামেরা প্রস্তুত নয়, একটু অপেক্ষা করুন")
+        } else if (videoUri == null) return toast("আগে ভিডিও নির্বাচন করুন")
+        val uri = videoUri
         save(); setStatus("সংযোগ হচ্ছে..."); startSvc()
         Thread {
             try {
@@ -799,20 +915,39 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
                     "status=LIVE_NOW&title=${enc(title.text.toString())}&access_token=${enc(tok)}"))
                 liveId = j.getString("id")
                 val url = j.getString("secure_stream_url")
-                ui.post {
-                    val g = RtmpFromFile(this, this, this, this); gen = g
-                    pfdV = contentResolver.openFileDescriptor(uri, "r"); pfdA = contentResolver.openFileDescriptor(uri, "r")
-                    if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 128 * 1024)) {
-                        try { setupOverlays(g) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
-                        if (listenCb.isChecked) {
-                            previewSound = false; applySound()
-                            try { g.playAudioDevice() } catch (_: Exception) {}
-                        }
-                        g.startStream(url)
-                    } else { toast("ভিডিও প্রস্তুত করা যায়নি"); endFb(); stopSvc() }
-                }
+                ui.post { if (srcCamera) startCamStream(url) else startFileStream(uri!!, url) }
             } catch (e: Exception) { setStatus("● অফলাইন"); toast("ত্রুটি: ${e.message}"); stopSvc() }
         }.start()
+    }
+
+    private fun startFileStream(uri: Uri, url: String) {
+        val g = RtmpFromFile(this, this, this, this); gen = g
+        pfdV = contentResolver.openFileDescriptor(uri, "r"); pfdA = contentResolver.openFileDescriptor(uri, "r")
+        if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 128 * 1024)) {
+            val sw = if (g.streamWidth > 0) g.streamWidth else 1280
+            val sh = if (g.streamHeight > 0) g.streamHeight else 720
+            try { setupOverlays(g.glInterface, sw, sh) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
+            if (listenCb.isChecked) {
+                previewSound = false; applySound()
+                try { g.playAudioDevice() } catch (_: Exception) {}
+            }
+            g.startStream(url)
+        } else { toast("ভিডিও প্রস্তুত করা যায়নি"); endFb(); stopSvc() }
+    }
+
+    private fun startCamStream(url: String) {
+        val c = cam
+        if (c == null) { toast("ক্যামেরা প্রস্তুত নয়"); endFb(); stopSvc(); return }
+        val (w, h) = qWH[qIdx]
+        val rot = CameraHelper.getCameraOrientation(this)
+        val portrait = rot == 90 || rot == 270
+        if (c.prepareAudio() && c.prepareVideo(w, h, bitrate)) {
+            val sw = if (portrait) h else w
+            val sh = if (portrait) w else h
+            try { setupOverlays(c.glInterface, sw, sh) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
+            if (!micOn) { try { c.disableAudio() } catch (_: Exception) {} }
+            c.startStream(url)
+        } else { toast("ক্যামেরা প্রস্তুত করা যায়নি"); endFb(); stopSvc() }
     }
 
     private fun endFb() { val id = liveId ?: return; liveId = null
@@ -820,9 +955,12 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
     private fun stopLive() {
         try { gen?.stopAudioDevice() } catch (_: Exception) {}
-        gen?.stopStream(); gen = null; endFb(); live = false
+        try { gen?.stopStream() } catch (_: Exception) {}
+        gen = null
+        try { if (cam?.isStreaming == true) cam?.stopStream() } catch (_: Exception) {}
+        endFb(); live = false
         ui.removeCallbacks(statsTick); ui.removeCallbacks(capTick)
-        capFilter = null; logoFilter = null; timeFilter = null; cropFilter = null
+        capFilter = null; logoFilter = null; timeFilter = null; cropFilter = null; glI = null
         barL = null; barR = null; barT = null; barB = null
         stopSvc()
         setStatus("● অফলাইন"); liveBtn.text = "লাইভ চালু করুন"
