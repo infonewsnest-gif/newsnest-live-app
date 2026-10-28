@@ -7,19 +7,23 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
 import android.view.animation.LinearInterpolator
 import android.widget.*
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.input.decoder.AudioDecoderInterface
 import com.pedro.encoder.input.decoder.VideoDecoderInterface
+import com.pedro.encoder.input.gl.render.filters.CropFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.TextObjectFilterRender
-import com.pedro.encoder.utils.gl.TranslateTo
 import com.pedro.library.rtmp.RtmpFromFile
 import org.json.JSONObject
 import java.io.File
@@ -63,7 +67,20 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private var logoBmp: Bitmap? = null
     private var tAnim: ValueAnimator? = null
 
+    // ফ্রেম, জুম, শব্দ
+    private lateinit var previewBox: FrameLayout
+    private lateinit var barLeftV: View
+    private lateinit var barRightV: View
+    private lateinit var frameInfo: TextView
+    private lateinit var listenCb: CheckBox
+    private var frame11 = false
+    private var zoom = 1f
+    private val barPct = 21.875f   // ১৬:৯ ফ্রেম থেকে ১:১ বানাতে দুই পাশে এই শতাংশ ঢাকা
+
     // স্ট্রিমের ওভারলে
+    private var cropFilter: CropFilterRender? = null
+    private var barL: ImageObjectFilterRender? = null
+    private var barR: ImageObjectFilterRender? = null
     private var capFilter: TextObjectFilterRender? = null
     private var logoFilter: ImageObjectFilterRender? = null
     private var timeFilter: TextObjectFilterRender? = null
@@ -91,6 +108,10 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         val sv = ScrollView(this).apply { setBackgroundColor(0xFF0B1020.toInt()); addView(col) }
         setContentView(sv)
 
+        if (Build.VERSION.SDK_INT >= 33) {
+            try { requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 9) } catch (_: Exception) {}
+        }
+
         status = tv("● অফলাইন", 16f)
         videoName = tv("কোনো ভিডিও নির্বাচিত নয়")
         timer = tv("00:00", 28f)
@@ -109,17 +130,39 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         })
         col.addView(videoName)
 
-        // প্রিভিউ: ভিডিও + লোগো (ওপরে বাঁয়ে) + ক্যাপশন (নিচে)
-        val box = FrameLayout(this)
+        // প্রিভিউ: ভিডিও + ১:১ বার + লোগো + ক্যাপশন, দুই আঙুলে জুম
+        previewBox = FrameLayout(this)
         preview = VideoView(this)
-        box.addView(preview, FrameLayout.LayoutParams(-1, 600))
+        previewBox.addView(preview, FrameLayout.LayoutParams(-1, 600))
+        barLeftV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
+        barRightV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
+        previewBox.addView(barLeftV, FrameLayout.LayoutParams(10, 600, Gravity.START))
+        previewBox.addView(barRightV, FrameLayout.LayoutParams(10, 600, Gravity.END))
         logoPrev = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
-        box.addView(logoPrev, FrameLayout.LayoutParams(130, 130, Gravity.TOP or Gravity.START).apply { setMargins(12, 12, 0, 0) })
+        previewBox.addView(logoPrev, FrameLayout.LayoutParams(130, 130, Gravity.TOP or Gravity.START).apply { setMargins(12, 12, 0, 0) })
         capBox = FrameLayout(this)
         ticker = TextView(this).apply { textSize = 18f; setSingleLine(true); setHorizontallyScrolling(true); setPadding(20, 6, 20, 6) }
         capBox.addView(ticker, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_VERTICAL))
-        box.addView(capBox, FrameLayout.LayoutParams(-1, 90, Gravity.BOTTOM))
-        col.addView(box, LinearLayout.LayoutParams(-1, 600))
+        previewBox.addView(capBox, FrameLayout.LayoutParams(-1, 90, Gravity.BOTTOM))
+        col.addView(previewBox, LinearLayout.LayoutParams(-1, 600))
+
+        val sgd = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                setZoom(zoom * d.scaleFactor); return true
+            }
+        })
+        previewBox.setOnTouchListener { v, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
+            sgd.onTouchEvent(e); true
+        }
+
+        // ফ্রেম বোতাম
+        frameInfo = tv("ফ্রেম: ১৬:৯    জুম: ১.০x", 14f)
+        val frow = LinearLayout(this)
+        frow.addView(btn("১৬:৯ ফ্রেম", 0xFF1F2937.toInt()) { setFrame(false) }, LinearLayout.LayoutParams(0, -2, 1f))
+        frow.addView(btn("১:১ ফ্রেম", 0xFF1F2937.toInt()) { setFrame(true) }, LinearLayout.LayoutParams(0, -2, 1f))
+        frow.addView(btn("জুম রিসেট", 0xFF1F2937.toInt()) { setZoom(1f) }, LinearLayout.LayoutParams(0, -2, 1f))
+        col.addView(frameInfo); col.addView(frow)
 
         col.addView(tv("কোয়ালিটি"))
         val row = LinearLayout(this)
@@ -127,6 +170,12 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             row.addView(btn(n, 0xFF1F2937.toInt()) { bitrate = br; toast("$n নির্বাচিত") }, LinearLayout.LayoutParams(0, -2, 1f))
         }
         col.addView(row)
+
+        listenCb = CheckBox(this).apply {
+            text = "লাইভের সময় ফোনেও শব্দ শুনব"; setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean("listen", true)
+        }
+        col.addView(listenCb)
 
         // লোগো ও ক্যাপশন সেটিং
         col.addView(tv("\nলোগো ও ক্যাপশন", 18f))
@@ -188,6 +237,49 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         } catch (e: Exception) { toast("ত্রুটি: ${e.message}") }
     }
 
+    // ---------- ফ্রেম ও জুম ----------
+    private fun setFrame(square: Boolean) {
+        frame11 = square
+        val w = (previewBox.width * barPct / 100f).toInt().coerceAtLeast(1)
+        barLeftV.layoutParams = FrameLayout.LayoutParams(w, 600, Gravity.START)
+        barRightV.layoutParams = FrameLayout.LayoutParams(w, 600, Gravity.END)
+        barLeftV.visibility = if (square) View.VISIBLE else View.GONE
+        barRightV.visibility = if (square) View.VISIBLE else View.GONE
+        applyFrameStream()
+        updateFrameInfo()
+    }
+
+    private fun setZoom(z: Float) {
+        zoom = z.coerceIn(1f, 4f)
+        preview.scaleX = zoom; preview.scaleY = zoom
+        applyZoomStream()
+        updateFrameInfo()
+    }
+
+    private fun updateFrameInfo() {
+        frameInfo.text = "ফ্রেম: " + (if (frame11) "১:১" else "১৬:৯") + "    জুম: " + "%.1f".format(zoom) + "x"
+    }
+
+    // স্ট্রিমে জুম: মাঝখান থেকে ক্রপ
+    private fun applyZoomStream() {
+        val f = cropFilter ?: return
+        val z = if (zoom < 1.02f) 1.02f else zoom
+        val side = 100f / z
+        f.setCropArea((100f - side) / 2f, (100f - side) / 2f, side, side)
+    }
+
+    // স্ট্রিমে ১:১: দুই পাশে কালো বার, লোগো ও মিনিট ভেতরে সরে আসে
+    private fun applyFrameStream() {
+        barL?.setAlpha(if (frame11) 1f else 0f)
+        barR?.setAlpha(if (frame11) 1f else 0f)
+        logoFilter?.setPosition(if (frame11) barPct + 2f else 2f, 3f)
+        val tf = timeFilter
+        if (tf != null) {
+            val right = if (frame11) 100f - barPct else 100f
+            tf.setPosition(right - tf.scale.x - 1f, 2f)
+        }
+    }
+
     // প্রিভিউতে ক্যাপশন বাঁ থেকে ডানে চলে
     private fun refreshPreviewTicker() {
         tAnim?.cancel()
@@ -195,7 +287,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         ticker.text = t
         ticker.setTextColor(colr(capColor.text.toString(), Color.WHITE))
         ticker.setBackgroundColor(colr(capBg.text.toString(), 0xFFB91C1C.toInt()))
-        ticker.visibility = if (t.isBlank()) android.view.View.INVISIBLE else android.view.View.VISIBLE
+        ticker.visibility = if (t.isBlank()) View.INVISIBLE else View.VISIBLE
         if (t.isBlank()) return
         capBox.post {
             val tw = ticker.paint.measureText(t) + 40f
@@ -229,11 +321,22 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         capY = 100f - f.scale.y - 2f
     }
 
-    // স্ট্রিমের ওপর লোগো ও মিনিট বসায়
+    // স্ট্রিমের ওপর জুম, ফ্রেম, লোগো ও মিনিট বসায় (ক্রম গুরুত্বপূর্ণ)
     private fun setupOverlays(g: RtmpFromFile) {
         val gl = g.glInterface
         streamW = if (g.streamWidth > 0) g.streamWidth else 1280
         streamH = if (g.streamHeight > 0) g.streamHeight else 720
+
+        val cf = CropFilterRender()
+        gl.addFilter(cf); cropFilter = cf
+        applyZoomStream()
+
+        val black = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+        val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(black)
+        bl.setScale(barPct, 100f); bl.setPosition(0f, 0f); barL = bl
+        val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(black)
+        br.setScale(barPct, 100f); br.setPosition(100f - barPct, 0f); barR = br
+
         logoBmp?.let { bmp ->
             val f = ImageObjectFilterRender()
             gl.addFilter(f); f.setImage(bmp)
@@ -246,8 +349,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         gl.addFilter(tf)
         tf.setText("00:00", streamH / 20f, Color.WHITE, 0xAA000000.toInt())
         tf.setDefaultScale(streamW, streamH)
-        tf.setPosition(TranslateTo.TOP_RIGHT)
         timeFilter = tf
+        applyFrameStream()
         applyCaptionStream()
     }
 
@@ -265,7 +368,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private fun save() = prefs.edit().putString("pid", pageId.text.toString()).putString("ltok", longTok.text.toString())
         .putString("stok", shortTok.text.toString()).putString("title", title.text.toString())
         .putString("cap", capText.text.toString()).putString("capc", capColor.text.toString())
-        .putString("capb", capBg.text.toString()).apply()
+        .putString("capb", capBg.text.toString()).putBoolean("listen", listenCb.isChecked).apply()
 
     private fun resolvePage(): Pair<String, String> {
         val tok = longTok.text.toString().ifBlank { shortTok.text.toString() }
@@ -308,9 +411,17 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         }.start()
     }
 
+    private fun startSvc() {
+        try {
+            val i = Intent(this, LiveService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+        } catch (e: Exception) { toast("সার্ভিস চালু হয়নি: ${e.message}") }
+    }
+    private fun stopSvc() { try { stopService(Intent(this, LiveService::class.java)) } catch (_: Exception) {} }
+
     private fun startLive() {
         val uri = videoUri ?: return toast("আগে ভিডিও নির্বাচন করুন")
-        save(); setStatus("সংযোগ হচ্ছে...")
+        save(); setStatus("সংযোগ হচ্ছে..."); startSvc()
         Thread {
             try {
                 val (id, tok) = try { resolvePage() } catch (e: Exception) {
@@ -326,10 +437,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
                     pfdV = contentResolver.openFileDescriptor(uri, "r"); pfdA = contentResolver.openFileDescriptor(uri, "r")
                     if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 128 * 1024)) {
                         try { setupOverlays(g) } catch (e: Exception) { toast("ওভারলে ত্রুটি: ${e.message}") }
+                        if (listenCb.isChecked) { try { g.playAudioDevice() } catch (_: Exception) {} }
                         g.startStream(url)
-                    } else { toast("ভিডিও প্রস্তুত করা যায়নি"); endFb() }
+                    } else { toast("ভিডিও প্রস্তুত করা যায়নি"); endFb(); stopSvc() }
                 }
-            } catch (e: Exception) { setStatus("● অফলাইন"); toast("ত্রুটি: ${e.message}") }
+            } catch (e: Exception) { setStatus("● অফলাইন"); toast("ত্রুটি: ${e.message}"); stopSvc() }
         }.start()
     }
 
@@ -337,9 +449,11 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         Thread { try { http("POST", "https://graph.facebook.com/v19.0/$id", "end_live_video=true&access_token=${enc(pageToken)}") } catch (_: Exception) {} }.start() }
 
     private fun stopLive() {
+        try { gen?.stopAudioDevice() } catch (_: Exception) {}
         gen?.stopStream(); gen = null; endFb(); live = false
         ui.removeCallbacks(statsTick); ui.removeCallbacks(capTick)
-        capFilter = null; logoFilter = null; timeFilter = null
+        capFilter = null; logoFilter = null; timeFilter = null; cropFilter = null; barL = null; barR = null
+        stopSvc()
         setStatus("● অফলাইন"); liveBtn.text = "লাইভ চালু করুন"
     }
 
