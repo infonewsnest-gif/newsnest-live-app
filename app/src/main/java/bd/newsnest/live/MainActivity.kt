@@ -71,7 +71,7 @@ private lateinit var preview: android.widget.VideoView
             startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "video/*"; addCategory(Intent.CATEGORY_OPENABLE) }, 1)
         })
         col.addView(videoName)
-        preview = android.widget.VideoView(this); col.addView(preview, LinearLayout.LayoutParams(-1,Button
+        preview = android.widget.VideoView(this); col.addView(preview, LinearLayout.LayoutParams(-1, 600))
                                                                                                  
         col.addView(tv("কোয়ালিটি"))
         val row = LinearLayout(this)
