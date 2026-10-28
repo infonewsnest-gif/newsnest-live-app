@@ -52,6 +52,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private var liveId: String? = null
     private var pageToken = ""
     private var live = false
+    private var busy = false
     private var startMs = 0L
     private var bitrate = 1_500_000
     private var qIdx = 1
@@ -819,17 +820,19 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             applyZoomStream()
         }
 
+        // প্রতিটা ফিল্টারের জন্য আলাদা ছবি (একই ছবি ভাগ করলে একটা ফিল্টার বন্ধ হলে বাকিগুলো ক্রাশ করে)
         if (OVERLAY_LEVEL >= 3) {
-            val black = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
-            val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(black); barL = bl
-            val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(black); barR = br
-            val bt = ImageObjectFilterRender(); gl.addFilter(bt); bt.setImage(black); barT = bt
-            val bb = ImageObjectFilterRender(); gl.addFilter(bb); bb.setImage(black); barB = bb
+            fun blackBmp() = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+            val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(blackBmp()); barL = bl
+            val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(blackBmp()); barR = br
+            val bt = ImageObjectFilterRender(); gl.addFilter(bt); bt.setImage(blackBmp()); barT = bt
+            val bb = ImageObjectFilterRender(); gl.addFilter(bb); bb.setImage(blackBmp()); barB = bb
         }
 
         if (OVERLAY_LEVEL >= 2) logoBmp?.let { bmp ->
             val f = ImageObjectFilterRender()
-            gl.addFilter(f); f.setImage(bmp)
+            gl.addFilter(f)
+            f.setImage(bmp.copy(Bitmap.Config.ARGB_8888, false) ?: bmp)
             val sx = logoScalePct()
             f.setScale(sx, sx * streamW / streamH * bmp.height / bmp.width)
             f.setPosition(logoXPct, logoYPct)
@@ -911,15 +914,49 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     }
     private fun stopSvc() { try { stopService(Intent(this, LiveService::class.java)) } catch (_: Exception) {} }
 
+    // ভিডিও ফাইলের শব্দ পরীক্ষা করে। ধীর হওয়ার ঝুঁকি থাকলে শব্দ ঠিক করা নতুন ফাইল ফেরত দেয়।
+    // এটা পেছনের থ্রেডে চলে।
+    private fun prepareAudioFile(uri: Uri): Uri {
+        try {
+            setStatus("শব্দ পরীক্ষা হচ্ছে...")
+            val info = AudioFix.probe(this, uri) ?: return uri
+            toast("শব্দ: ফাইলে ${info.extSr}Hz ${info.extCh}ch ${info.extBr / 1000}kbps, ডিকোডারে ${info.outSr}Hz ${info.outCh}ch")
+            val mismatch = info.extSr != info.outSr || info.extCh != info.outCh
+            val lowRate = info.extBr in 1..64000
+            if (!mismatch && !lowRate) return uri
+            val out = File(cacheDir, "audio_fixed_${uri.toString().hashCode()}.mp4")
+            cacheDir.listFiles()?.forEach { if (it.name.startsWith("audio_fixed_") && it.name != out.name) it.delete() }
+            if (out.exists() && out.length() > 0) return Uri.fromFile(out)
+            setStatus("শব্দ ঠিক করা হচ্ছে...")
+            var last = -1
+            val ok = AudioFix.fix(this, uri, out, info) { p ->
+                if (p != last && p % 5 == 0) { last = p; setStatus("শব্দ ঠিক করা হচ্ছে $p%") }
+            }
+            if (ok) { toast("শব্দ ঠিক করা হয়েছে"); return Uri.fromFile(out) }
+            out.delete()
+            toast("শব্দ ঠিক করা যায়নি, মূল ভিডিও চলবে")
+        } catch (e: Exception) {
+            toast("শব্দ পরীক্ষা হয়নি: ${e.message}")
+        }
+        return uri
+    }
+
     private fun startLive() {
+        if (busy) return toast("একটু অপেক্ষা করুন, শব্দ ঠিক করা হচ্ছে")
         if (srcCamera) {
             if (!hasPerm()) { askPerm(); return toast("ক্যামেরা ও মাইকের অনুমতি দিন") }
             if (cam == null) return toast("ক্যামেরা প্রস্তুত নয়, একটু অপেক্ষা করুন")
         } else if (videoUri == null) return toast("আগে ভিডিও নির্বাচন করুন")
         val uri = videoUri
         save(); setStatus("সংযোগ হচ্ছে..."); startSvc()
+        busy = true
         Thread {
             try {
+                // ভিডিও ফাইল মোড: ফেসবুকে লাইভ খোলার আগে শব্দ পরীক্ষা/ঠিক করা
+                var useUri = uri
+                if (!srcCamera && uri != null) useUri = prepareAudioFile(uri)
+                setStatus("সংযোগ হচ্ছে...")
+
                 val (id, tok) = try { resolvePage() } catch (e: Exception) {
                     pageId.text.toString() to longTok.text.toString().ifBlank { shortTok.text.toString() }
                 }
@@ -928,8 +965,10 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
                     "status=LIVE_NOW&title=${enc(title.text.toString())}&access_token=${enc(tok)}"))
                 liveId = j.getString("id")
                 val url = j.getString("secure_stream_url")
-                ui.post { if (srcCamera) startCamStream(url) else startFileStream(uri!!, url) }
+                val finalUri = useUri
+                ui.post { if (srcCamera) startCamStream(url) else startFileStream(finalUri!!, url) }
             } catch (e: Exception) { setStatus("● অফলাইন"); toast("ত্রুটি: ${e.message}"); stopSvc() }
+            finally { busy = false }
         }.start()
     }
 
@@ -955,7 +994,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         val (w, h) = qWH[qIdx]
         val rot = CameraHelper.getCameraOrientation(this)
         val portrait = rot == 90 || rot == 270
-        if (c.prepareAudio() && c.prepareVideo(w, h, bitrate)) {
+        // শব্দ: ১২৮ kbps, ৪৪১০০ Hz, স্টেরিও (আগে খালি prepareAudio() ছিল, তাতে কম মানের ডিফল্ট নেয়)
+        if (c.prepareAudio(128 * 1000, 44100, true, false, false) && c.prepareVideo(w, h, bitrate)) {
             val sw = if (portrait) h else w
             val sh = if (portrait) w else h
             // ওভারলে এখন জোড়া হবে না। সংযোগ সফল হলে (onConnectionSuccess) জোড়া হবে
