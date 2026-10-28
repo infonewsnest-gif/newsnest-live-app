@@ -3,6 +3,7 @@ package bd.newsnest.live
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -55,9 +56,12 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private lateinit var videoDur: TextView
     private lateinit var playBtn: Button
     private lateinit var soundBtn: Button
+    private lateinit var seekBar: SeekBar
+    private var seeking = false
     private var mp: MediaPlayer? = null
     private var previewSound = true
     private var durTotal = "--:--"
+    private var durMs = 0
     private lateinit var timer: TextView
     private lateinit var liveBtn: Button
     private lateinit var preview: VideoView
@@ -77,6 +81,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private var logoBmp: Bitmap? = null
     private var tAnim: ValueAnimator? = null
     private var logoPx = 96
+    private var logoXPct = 2f
+    private var logoYPct = 3f
     private var speedSec = 18
     private var dirRtl = true   // true = ডান → বাম
 
@@ -84,16 +90,20 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private lateinit var previewBox: FrameLayout
     private lateinit var barLeftV: View
     private lateinit var barRightV: View
+    private lateinit var barTopV: View
+    private lateinit var barBotV: View
     private lateinit var frameInfo: TextView
     private lateinit var listenCb: CheckBox
-    private var frame11 = false
+    private var videoAspect = 16f / 9f
+    private var frameAspect = 0f   // 0 = মূল (কোনো বার নেই)
     private var zoom = 1f
-    private val barPct = 21.875f
 
     // স্ট্রিমের ওভারলে
     private var cropFilter: CropFilterRender? = null
     private var barL: ImageObjectFilterRender? = null
     private var barR: ImageObjectFilterRender? = null
+    private var barT: ImageObjectFilterRender? = null
+    private var barB: ImageObjectFilterRender? = null
     private var capFilter: TextObjectFilterRender? = null
     private var logoFilter: ImageObjectFilterRender? = null
     private var timeFilter: TextObjectFilterRender? = null
@@ -132,7 +142,6 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
     private fun gap(h: Int = 14) = View(this).also { it.layoutParams = LinearLayout.LayoutParams(-1, h) }
 
-    // কার্ড: গোল কোণ + হালকা বর্ডার
     private fun card(heading: String): LinearLayout {
         val c = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -144,21 +153,23 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         return c
     }
 
-    // নির্বাচিত বোতাম সবুজ, বাকিগুলো কালো
-    private fun toggles(labels: List<String>, init: Int, onPick: (Int) -> Unit): LinearLayout {
-        val row = LinearLayout(this)
+    // নির্বাচিত বোতাম সবুজ, বাকিগুলো কালো। perRow = এক সারিতে কয়টা বোতাম
+    private fun toggles(labels: List<String>, init: Int, perRow: Int, onPick: (Int) -> Unit): LinearLayout {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val bs = mutableListOf<Button>()
         fun paint(sel: Int) { bs.forEachIndexed { i, b -> b.background = round(if (i == sel) GREEN else DARK, 24f) } }
+        var row: LinearLayout? = null
         labels.forEachIndexed { i, l ->
+            if (i % perRow == 0) { row = LinearLayout(this); box.addView(row) }
             val b = Button(this).apply {
                 text = l; setTextColor(Color.WHITE); isAllCaps = false
                 setOnClickListener { paint(i); onPick(i) }
             }
             bs.add(b)
-            row.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
+            row!!.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(6, 8, 6, 8) })
         }
         paint(init)
-        return row
+        return box
     }
 
     private fun seek(min: Int, max: Int, init: Int, onChange: (Int) -> Unit) = SeekBar(this).apply {
@@ -181,6 +192,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         }
 
         logoPx = prefs.getInt("logopx", 96)
+        logoXPct = prefs.getFloat("lx", 2f)
+        logoYPct = prefs.getFloat("ly", 3f)
         speedSec = prefs.getInt("speed", 18)
         dirRtl = prefs.getBoolean("rtl", true)
 
@@ -206,15 +219,19 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
         // ---------- প্রিভিউ কার্ড ----------
         val pc = card("")
-        previewBox = FrameLayout(this)
+        previewBox = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         preview = VideoView(this)
-        previewBox.addView(preview, FrameLayout.LayoutParams(-1, 600))
+        previewBox.addView(preview, FrameLayout.LayoutParams(-1, -1))
         barLeftV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
         barRightV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
-        previewBox.addView(barLeftV, FrameLayout.LayoutParams(10, 600, Gravity.START))
-        previewBox.addView(barRightV, FrameLayout.LayoutParams(10, 600, Gravity.END))
-        logoPrev = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
-        previewBox.addView(logoPrev, FrameLayout.LayoutParams(logoPx, logoPx, Gravity.TOP or Gravity.START).apply { setMargins(12, 12, 0, 0) })
+        barTopV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
+        barBotV = View(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
+        previewBox.addView(barLeftV, FrameLayout.LayoutParams(10, -1, Gravity.START))
+        previewBox.addView(barRightV, FrameLayout.LayoutParams(10, -1, Gravity.END))
+        previewBox.addView(barTopV, FrameLayout.LayoutParams(-1, 10, Gravity.TOP))
+        previewBox.addView(barBotV, FrameLayout.LayoutParams(-1, 10, Gravity.BOTTOM))
+        logoPrev = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START; adjustViewBounds = true }
+        previewBox.addView(logoPrev, FrameLayout.LayoutParams(logoPx, -2, Gravity.TOP or Gravity.START))
         capBox = FrameLayout(this)
         ticker = TextView(this).apply { textSize = 18f; setSingleLine(true); setHorizontallyScrolling(true); setPadding(20, 6, 20, 6) }
         capBox.addView(ticker, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_VERTICAL))
@@ -222,6 +239,26 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         pc.addView(previewBox, LinearLayout.LayoutParams(-1, 600))
         pc.addView(videoName)
         pc.addView(videoDur)
+
+        // ভিডিও সিক বার: টেনে যেকোনো মিনিটে যাওয়া যায়
+        seekBar = SeekBar(this).apply {
+            max = 1
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) {
+                        preview.seekTo(p)
+                        videoDur.text = "সময়: ${fmtMs(p)} / $durTotal মিনিট"
+                    }
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) { seeking = true }
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    seeking = false
+                    seekStream(seekBar.progress)
+                }
+            })
+        }
+        pc.addView(seekBar)
+
         playBtn = btn("▶ প্লে", DARK) { togglePlay() }
         soundBtn = btn("🔊 শব্দ চালু", DARK) { previewSound = !previewSound; applySound() }
         val prow2 = LinearLayout(this)
@@ -230,6 +267,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         pc.addView(prow2)
         ui.post(posTick)
 
+        // দুই আঙুলে জুম
         val sgd = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(d: ScaleGestureDetector): Boolean { setZoom(zoom * d.scaleFactor); return true }
         })
@@ -237,6 +275,29 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             if (e.actionMasked == MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
             sgd.onTouchEvent(e); true
         }
+
+        // লোগো আঙুল দিয়ে টেনে সরানো
+        var ox = 0f; var oy = 0f
+        logoPrev.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    ox = v.translationX - e.rawX; oy = v.translationY - e.rawY
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val maxX = (previewBox.width - v.width).toFloat().coerceAtLeast(0f)
+                    val maxY = (previewBox.height - v.height).toFloat().coerceAtLeast(0f)
+                    val nx = (e.rawX + ox).coerceIn(0f, maxX)
+                    val ny = (e.rawY + oy).coerceIn(0f, maxY)
+                    v.translationX = nx; v.translationY = ny
+                    logoXPct = nx * 100f / previewBox.width
+                    logoYPct = ny * 100f / previewBox.height
+                    logoFilter?.setPosition(logoXPct, logoYPct)
+                }
+            }
+            true
+        }
+        updatePreviewSize()
 
         // ---------- লোগো কার্ড ----------
         val lc = card("")
@@ -247,6 +308,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         lc.addView(tv("\nলোগো সাইজ"))
         lc.addView(seek(48, 240, logoPx) { v -> logoPx = v; logoVal.text = "${v}px"; setLogoSize(v) })
         lc.addView(logoVal)
+        lc.addView(tv("লোগো সরাতে প্রিভিউতে লোগোর ওপর আঙুল রেখে টানুন", 12f).apply { setTextColor(Color.GRAY) })
 
         // ---------- টোকেন কার্ড ----------
         val tc = card("টোকেন ও পেইজ ম্যানেজার")
@@ -263,15 +325,16 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
             startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "video/*"; addCategory(Intent.CATEGORY_OPENABLE) }, 1)
         })
 
-        sc.addView(tv("\nঅনুপাত", 13f))
-        sc.addView(toggles(listOf("16:9 ল্যান্ডস্কেপ", "1:1 স্কয়ার"), 0) { setFrame(it == 1) })
-        frameInfo = tv("ফ্রেম: ১৬:৯    জুম: ১.০x", 13f)
+        sc.addView(tv("\nফ্রেম / অনুপাত", 13f))
+        val ratios = listOf(0f, 16f / 9f, 9f / 16f, 4f / 3f, 3f / 4f, 4f / 5f, 1f)
+        sc.addView(toggles(listOf("মূল", "16:9", "9:16", "4:3", "3:4", "4:5", "1:1"), 0, 4) { setFrame(ratios[it]) })
+        frameInfo = tv("ফ্রেম: মূল    জুম: ১.০x", 13f)
         sc.addView(frameInfo)
         sc.addView(btn("জুম রিসেট", DARK) { setZoom(1f) })
 
         sc.addView(tv("\nকোয়ালিটি", 13f))
         val qs = listOf(600_000, 1_500_000, 3_000_000)
-        sc.addView(toggles(listOf("360p", "720p", "1080p"), 1) { bitrate = qs[it] })
+        sc.addView(toggles(listOf("360p", "720p", "1080p"), 1, 3) { bitrate = qs[it] })
 
         listenCb = CheckBox(this).apply {
             text = "লাইভের সময় ফোনেও শব্দ শুনব"; setTextColor(Color.WHITE)
@@ -291,7 +354,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         sc.addView(btn("ক্যাপশন প্রয়োগ করুন") { applyCaption() })
 
         sc.addView(tv("\nদিক", 13f))
-        sc.addView(toggles(listOf("ডান → বাম", "বাম → ডান"), if (dirRtl) 0 else 1) {
+        sc.addView(toggles(listOf("ডান → বাম", "বাম → ডান"), if (dirRtl) 0 else 1, 2) {
             dirRtl = (it == 0)
             save(); refreshPreviewTicker()
             if (live) resetCaptionPos()
@@ -331,13 +394,64 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
     override fun onPause() { super.onPause(); save() }
 
+    // ফোন ঘোরালে প্রিভিউ নতুন মাপে বসে (AndroidManifest এ configChanges দিতে হবে)
+    override fun onConfigurationChanged(c: Configuration) {
+        super.onConfigurationChanged(c)
+        updatePreviewSize()
+        refreshPreviewTicker()
+    }
+
+    // ---------- প্রিভিউয়ের মাপ ও ফ্রেমের বার ----------
+    private fun updatePreviewSize() {
+        val w = resources.displayMetrics.widthPixels - 144
+        val maxH = (resources.displayMetrics.heightPixels * 0.7f).toInt()
+        var h = (w / videoAspect).toInt()
+        var ww = -1
+        if (h > maxH) { h = maxH; ww = (h * videoAspect).toInt() }
+        previewBox.layoutParams = LinearLayout.LayoutParams(ww, h).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        previewBox.post { updateBars(); placeLogoPreview() }
+    }
+
+    private fun placeLogoPreview() {
+        logoPrev.translationX = logoXPct * previewBox.width / 100f
+        logoPrev.translationY = logoYPct * previewBox.height / 100f
+    }
+
+    // (পাশের বার %, ওপর-নিচের বার %)
+    private fun barPcts(va: Float): Pair<Float, Float> {
+        if (frameAspect <= 0f) return 0f to 0f
+        return if (frameAspect < va) ((1f - frameAspect / va) / 2f * 100f) to 0f
+        else 0f to ((1f - va / frameAspect) / 2f * 100f)
+    }
+
+    private fun updateBars() {
+        val (sp, tp) = barPcts(videoAspect)
+        val bw = (previewBox.width * sp / 100f).toInt().coerceAtLeast(1)
+        val bh = (previewBox.height * tp / 100f).toInt().coerceAtLeast(1)
+        barLeftV.layoutParams = FrameLayout.LayoutParams(bw, -1, Gravity.START)
+        barRightV.layoutParams = FrameLayout.LayoutParams(bw, -1, Gravity.END)
+        barTopV.layoutParams = FrameLayout.LayoutParams(-1, bh, Gravity.TOP)
+        barBotV.layoutParams = FrameLayout.LayoutParams(-1, bh, Gravity.BOTTOM)
+        barLeftV.visibility = if (sp > 0f) View.VISIBLE else View.GONE
+        barRightV.visibility = if (sp > 0f) View.VISIBLE else View.GONE
+        barTopV.visibility = if (tp > 0f) View.VISIBLE else View.GONE
+        barBotV.visibility = if (tp > 0f) View.VISIBLE else View.GONE
+    }
+
+    // ---------- প্লেয়ার ----------
     private fun fmtMs(ms: Int): String {
         val s = ms / 1000; val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
         return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
     }
 
     private val posTick = object : Runnable { override fun run() {
-        try { if (durTotal != "--:--") videoDur.text = "সময়: ${fmtMs(preview.currentPosition)} / $durTotal মিনিট" } catch (_: Exception) {}
+        try {
+            if (durTotal != "--:--" && !seeking) {
+                val p = preview.currentPosition
+                videoDur.text = "সময়: ${fmtMs(p)} / $durTotal মিনিট"
+                seekBar.progress = p
+            }
+        } catch (_: Exception) {}
         ui.postDelayed(this, 500) } }
 
     private fun togglePlay() {
@@ -352,23 +466,46 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         soundBtn.text = if (previewSound) "🔊 শব্দ চালু" else "🔇 শব্দ বন্ধ"
     }
 
-    private fun videoDurationText(uri: Uri): String = try {
-        val mmr = MediaMetadataRetriever()
-        mmr.setDataSource(this, uri)
-        val ms = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
-        mmr.release()
-        val s = ms / 1000
-        val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
-        if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
-    } catch (e: Exception) { "--:--" }
+    // লাইভ চলাকালে স্ট্রিমও ওই মিনিটে নেওয়ার চেষ্টা (লাইব্রেরির moveTo ফাংশন থাকলে)
+    private fun seekStream(ms: Int) {
+        val g = gen ?: return
+        try {
+            val m = g.javaClass.methods.firstOrNull { it.name == "moveTo" && it.parameterTypes.size == 1 } ?: return
+            val sec = ms / 1000.0
+            when (m.parameterTypes[0]) {
+                java.lang.Double.TYPE -> m.invoke(g, sec)
+                java.lang.Float.TYPE -> m.invoke(g, sec.toFloat())
+                java.lang.Integer.TYPE -> m.invoke(g, (ms / 1000))
+                else -> {}
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun loadVideoMeta(uri: Uri) {
+        try {
+            val mmr = MediaMetadataRetriever()
+            mmr.setDataSource(this, uri)
+            durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toInt() ?: 0
+            var w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt() ?: 0
+            var h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt() ?: 0
+            val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt() ?: 0
+            mmr.release()
+            if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
+            if (w > 0 && h > 0) videoAspect = w.toFloat() / h
+        } catch (_: Exception) {}
+        durTotal = if (durMs > 0) fmtMs(durMs) else "--:--"
+        seekBar.max = if (durMs > 0) durMs else 1
+        seekBar.progress = 0
+    }
 
     override fun onActivityResult(r: Int, c: Int, d: Intent?) {
         if (r == 1 && c == RESULT_OK && d?.data != null) {
             videoUri = d.data
             contentResolver.takePersistableUriPermission(d.data!!, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             videoName.text = "নির্বাচিত: " + d.data!!.lastPathSegment
-            durTotal = videoDurationText(d.data!!)
+            loadVideoMeta(d.data!!)
             videoDur.text = "সময়: 0:00 / $durTotal মিনিট"
+            updatePreviewSize()
             preview.setVideoURI(d.data)
             preview.setOnPreparedListener { m -> mp = m; m.isLooping = true; applySound() }
             preview.start(); playBtn.text = "⏸ পজ"
@@ -388,7 +525,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
 
     // লোগো সাইজ: প্রিভিউ ও (লাইভ চললে) স্ট্রিম দুটোতেই বদলায়
     private fun setLogoSize(px: Int) {
-        logoPrev.layoutParams = FrameLayout.LayoutParams(px, px, Gravity.TOP or Gravity.START).apply { setMargins(12, 12, 0, 0) }
+        logoPrev.layoutParams = FrameLayout.LayoutParams(px, -2, Gravity.TOP or Gravity.START)
         val f = logoFilter; val bmp = logoBmp
         if (f != null && bmp != null) {
             val sx = logoScalePct()
@@ -402,13 +539,9 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     }
 
     // ---------- ফ্রেম ও জুম ----------
-    private fun setFrame(square: Boolean) {
-        frame11 = square
-        val w = (previewBox.width * barPct / 100f).toInt().coerceAtLeast(1)
-        barLeftV.layoutParams = FrameLayout.LayoutParams(w, 600, Gravity.START)
-        barRightV.layoutParams = FrameLayout.LayoutParams(w, 600, Gravity.END)
-        barLeftV.visibility = if (square) View.VISIBLE else View.GONE
-        barRightV.visibility = if (square) View.VISIBLE else View.GONE
+    private fun setFrame(ratio: Float) {
+        frameAspect = ratio
+        updateBars()
         applyFrameStream()
         updateFrameInfo()
     }
@@ -420,8 +553,18 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         updateFrameInfo()
     }
 
+    private fun frameName(): String = when {
+        frameAspect <= 0f -> "মূল"
+        Math.abs(frameAspect - 16f / 9f) < 0.01f -> "16:9"
+        Math.abs(frameAspect - 9f / 16f) < 0.01f -> "9:16"
+        Math.abs(frameAspect - 4f / 3f) < 0.01f -> "4:3"
+        Math.abs(frameAspect - 3f / 4f) < 0.01f -> "3:4"
+        Math.abs(frameAspect - 4f / 5f) < 0.01f -> "4:5"
+        else -> "1:1"
+    }
+
     private fun updateFrameInfo() {
-        frameInfo.text = "ফ্রেম: " + (if (frame11) "১:১" else "১৬:৯") + "    জুম: " + "%.1f".format(zoom) + "x"
+        frameInfo.text = "ফ্রেম: " + frameName() + "    জুম: " + "%.1f".format(zoom) + "x"
     }
 
     private fun applyZoomStream() {
@@ -431,15 +574,18 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         f.setCropArea((100f - side) / 2f, (100f - side) / 2f, side, side)
     }
 
+    // স্ট্রিমে ফ্রেমের চার পাশের কালো বার, লোগো ও মিনিটের জায়গা
     private fun applyFrameStream() {
-        barL?.setAlpha(if (frame11) 1f else 0f)
-        barR?.setAlpha(if (frame11) 1f else 0f)
-        logoFilter?.setPosition(if (frame11) barPct + 2f else 2f, 3f)
+        val (sp, tp) = barPcts(streamW.toFloat() / streamH)
+        val s = sp.coerceAtLeast(0.1f); val t = tp.coerceAtLeast(0.1f)
+        barL?.let { it.setScale(s, 100f); it.setPosition(0f, 0f); it.setAlpha(if (sp > 0f) 1f else 0f) }
+        barR?.let { it.setScale(s, 100f); it.setPosition(100f - s, 0f); it.setAlpha(if (sp > 0f) 1f else 0f) }
+        barT?.let { it.setScale(100f, t); it.setPosition(0f, 0f); it.setAlpha(if (tp > 0f) 1f else 0f) }
+        barB?.let { it.setScale(100f, t); it.setPosition(0f, 100f - t); it.setAlpha(if (tp > 0f) 1f else 0f) }
+        logoFilter?.setPosition(logoXPct, logoYPct)
         val tf = timeFilter
-        if (tf != null) {
-            val right = if (frame11) 100f - barPct else 100f
-            tf.setPosition(right - tf.scale.x - 1f, 2f)
-        }
+        if (tf != null) tf.setPosition(100f - sp - tf.scale.x - 1f, tp + 2f)
+        capFilter?.let { capY = 100f - tp - it.scale.y - 2f }
     }
 
     // প্রিভিউতে ক্যাপশন চলে (দিক ও গতি অনুযায়ী)
@@ -485,7 +631,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         if (f == null) { f = TextObjectFilterRender(); g.glInterface.addFilter(f); capFilter = f }
         f.setText(t, streamH / 18f, colr(capColor.text.toString(), Color.WHITE), colr(capBg.text.toString(), 0xFFB91C1C.toInt()))
         f.setDefaultScale(streamW, streamH)
-        capY = 100f - f.scale.y - 2f
+        val (_, tp) = barPcts(streamW.toFloat() / streamH)
+        capY = 100f - tp - f.scale.y - 2f
         resetCaptionPos()
     }
 
@@ -499,17 +646,17 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         applyZoomStream()
 
         val black = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
-        val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(black)
-        bl.setScale(barPct, 100f); bl.setPosition(0f, 0f); barL = bl
-        val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(black)
-        br.setScale(barPct, 100f); br.setPosition(100f - barPct, 0f); barR = br
+        val bl = ImageObjectFilterRender(); gl.addFilter(bl); bl.setImage(black); barL = bl
+        val br = ImageObjectFilterRender(); gl.addFilter(br); br.setImage(black); barR = br
+        val bt = ImageObjectFilterRender(); gl.addFilter(bt); bt.setImage(black); barT = bt
+        val bb = ImageObjectFilterRender(); gl.addFilter(bb); bb.setImage(black); barB = bb
 
         logoBmp?.let { bmp ->
             val f = ImageObjectFilterRender()
             gl.addFilter(f); f.setImage(bmp)
             val sx = logoScalePct()
             f.setScale(sx, sx * streamW / streamH * bmp.height / bmp.width)
-            f.setPosition(2f, 3f)
+            f.setPosition(logoXPct, logoYPct)
             logoFilter = f
         }
         val tf = TextObjectFilterRender()
@@ -536,7 +683,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         .putString("stok", shortTok.text.toString()).putString("title", title.text.toString())
         .putString("cap", capText.text.toString()).putString("capc", capColor.text.toString())
         .putString("capb", capBg.text.toString()).putBoolean("listen", listenCb.isChecked)
-        .putInt("logopx", logoPx).putInt("speed", speedSec).putBoolean("rtl", dirRtl).apply()
+        .putInt("logopx", logoPx).putFloat("lx", logoXPct).putFloat("ly", logoYPct)
+        .putInt("speed", speedSec).putBoolean("rtl", dirRtl).apply()
 
     private fun resolvePage(): Pair<String, String> {
         val tok = longTok.text.toString().ifBlank { shortTok.text.toString() }
@@ -623,7 +771,8 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         try { gen?.stopAudioDevice() } catch (_: Exception) {}
         gen?.stopStream(); gen = null; endFb(); live = false
         ui.removeCallbacks(statsTick); ui.removeCallbacks(capTick)
-        capFilter = null; logoFilter = null; timeFilter = null; cropFilter = null; barL = null; barR = null
+        capFilter = null; logoFilter = null; timeFilter = null; cropFilter = null
+        barL = null; barR = null; barT = null; barB = null
         stopSvc()
         setStatus("● অফলাইন"); liveBtn.text = "লাইভ চালু করুন"
     }
@@ -636,7 +785,6 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
         timeFilter?.setText(txt, streamH / 20f, Color.WHITE, 0xAA000000.toInt())
         ui.postDelayed(this, 1000) } }
 
-    // স্ট্রিমের ক্যাপশন দিক ও গতি অনুযায়ী সরায় (প্রতি ৪০ms)
     private val capTick = object : Runnable { override fun run() {
         if (!live) return
         val f = capFilter
