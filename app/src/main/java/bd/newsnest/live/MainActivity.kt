@@ -936,7 +936,7 @@ class MainActivity : Activity(), ConnectChecker, VideoDecoderInterface, AudioDec
     private fun startFileStream(uri: Uri, url: String) {
         val g = RtmpFromFile(this, this, this, this); gen = g
         pfdV = contentResolver.openFileDescriptor(uri, "r"); pfdA = contentResolver.openFileDescriptor(uri, "r")
-        if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 128 * 1024)) {
+        if (g.prepareVideo(pfdV!!.fileDescriptor, bitrate, 0) && g.prepareAudio(pfdA!!.fileDescriptor, 192 * 1024)) {
             val sw = if (g.streamWidth > 0) g.streamWidth else 1280
             val sh = if (g.streamHeight > 0) g.streamHeight else 720
             // ওভারলে এখন জোড়া হবে না। সংযোগ সফল হলে (onConnectionSuccess) জোড়া হবে
